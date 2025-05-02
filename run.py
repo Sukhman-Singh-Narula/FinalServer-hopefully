@@ -4,7 +4,7 @@ import logging
 import uvicorn
 from app.main import app
 from app.redis_client import get_redis_client
-from app.syllabus_manager import SyllabusManager
+# from app.syllabus_manager import SyllabusManager
 from app.workflow_engine import WorkflowEngine
 
 async def setup():
@@ -13,8 +13,8 @@ async def setup():
     redis = await get_redis_client()
     
     # Load syllabus into Redis
-    syllabus = SyllabusManager("./syllabus")
-    await syllabus.load_syllabus_to_redis()
+    # syllabus = SyllabusManager("./syllabus")
+    # await syllabus.load_syllabus_to_redis()
     
     logging.info("Setup complete")
 

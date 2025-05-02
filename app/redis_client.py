@@ -13,7 +13,7 @@ async def get_redis_client():
             host=REDIS_HOST,
             port=REDIS_PORT,
             db=REDIS_DB,
-            decode_responses=False  # Keep binary data as bytes
+            decode_responses=False
         )
         
         # Test connection

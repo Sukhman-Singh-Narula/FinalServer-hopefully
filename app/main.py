@@ -11,6 +11,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from app.redis_client import get_redis_client, get_redis_pubsub
 from app.firebase_service import get_user_from_firestore
+from app.worker import start_audio_worker
+from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
 
 
 logging.basicConfig(level=logging.INFO)
@@ -66,57 +68,25 @@ async def health_check():
     """Simple health check endpoint"""
     return {"status": "ok"}
 
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str, background_tasks: BackgroundTasks):
+@app.websocket("/ws/{device_id}")
+async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
     
     # Generate a unique session ID
-    session_id = f"session:{user_id}:{int(asyncio.get_event_loop().time())}"
+    session_id = f"session:{device_id}:{int(asyncio.get_event_loop().time())}"
     
     # Store connection
     active_connections[session_id] = {
         "websocket": websocket,
-        "user_id": user_id,
+        "device_id": device_id,
         "last_activity": asyncio.get_event_loop().time()
     }
     
-    logger.info(f"Client connected: {user_id}, session: {session_id}")
+    logger.info(f"ESP device connected: {device_id}, session: {session_id}")
     
     try:
         # Get Redis client
-        redis = await get_redis_client()
-        
-        # Check for cached user data
-        user_data_bytes = await redis.get(f"user:{user_id}")
-        
-        if user_data_bytes:
-            user_data = json.loads(user_data_bytes)
-            logger.info(f"Found cached user data for {user_id}")
-        else:
-            # Get from Firebase
-            user_data = await get_user_from_firestore(user_id)
-            if user_data:
-                # Cache in Redis
-                await redis.set(
-                    f"user:{user_id}", 
-                    json.dumps(user_data),
-                    ex=3600  # 1 hour expiration
-                )
-        
-        # Create PubSub for responses
-        pubsub = await get_redis_pubsub()
-        await pubsub.subscribe(f"responses:{session_id}")
-        
-        # Start background listener for responses
-        background_tasks.add_task(
-            handle_pubsub_messages,
-            pubsub,
-            websocket
-        )
-        
-        # Send welcome message
-        welcome_msg = f"Connected to Language Tutor. User: {user_data.get('name', 'Friend')}"
-        await websocket.send_json({"type": "message", "text": welcome_msg})
+        redis_client = await get_redis_client()
         
         # Process WebSocket messages
         while True:
@@ -126,17 +96,31 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, background_task
                 # Handle binary audio data
                 audio_bytes = data["bytes"]
                 
-                # Store in Redis and publish for processing
-                audio_key = f"audio:{session_id}:{asyncio.get_event_loop().time()}"
-                await redis.set(audio_key, audio_bytes, ex=60)  # 60s expiration
+                # Log audio chunk size
+                logger.debug(f"Received audio chunk: {len(audio_bytes)} bytes")
                 
-                # Publish notification for processing
-                await redis.publish(
-                    "audio:processing",
+                # Publish to Redis PubSub
+                await redis_client.publish(
+                    "audio:stream",
                     json.dumps({
                         "session_id": session_id,
+                        "device_id": device_id,
+                        "timestamp": asyncio.get_event_loop().time(),
+                        "chunk_size": len(audio_bytes)
+                    })
+                )
+                
+                # Store actual audio bytes in Redis
+                audio_key = f"audio:{session_id}:{asyncio.get_event_loop().time()}"
+                await redis_client.set(audio_key, audio_bytes, ex=120)  # 60s expiration
+                
+                # Publish the key where the audio is stored
+                await redis_client.publish(
+                    "audio:keys",
+                    json.dumps({
+                        "session_id": session_id,
+                        "device_id": device_id,
                         "audio_key": audio_key,
-                        "user_id": user_id,
                         "timestamp": asyncio.get_event_loop().time()
                     })
                 )
@@ -147,17 +131,34 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, background_task
                     message = json.loads(data["text"])
                     logger.info(f"Received message: {message}")
                     
-                    # Process command
-                    if message.get("type") == "command":
-                        # Handle command
-                        pass
+                    # Process command if needed
+                    command_type = message.get("type")
+                    
+                    if command_type == "end_stream":
+                        # Signal end of audio stream
+                        await redis_client.publish(
+                            "audio:control",
+                            json.dumps({
+                                "session_id": session_id,
+                                "device_id": device_id,
+                                "command": "end_stream",
+                                "timestamp": asyncio.get_event_loop().time()
+                            })
+                        )
+                        await websocket.send_text(json.dumps({
+                            "type": "info", 
+                            "message": "Stream end acknowledged"
+                        }))
                         
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON received")
-                    await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                    await websocket.send_text(json.dumps({
+                        "type": "error", 
+                        "message": "Invalid JSON"
+                    }))
     
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {user_id}")
+        logger.info(f"ESP device disconnected: {device_id}")
         # Clean up
         if session_id in active_connections:
             del active_connections[session_id]
@@ -167,36 +168,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, background_task
         # Clean up
         if session_id in active_connections:
             del active_connections[session_id]
-
-async def handle_pubsub_messages(pubsub, websocket):
-    """Background task to handle Redis PubSub messages"""
-    try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                # Parse message data
-                data = json.loads(message["data"])
-                
-                if data.get("type") == "audio_response":
-                    # Get audio data from Redis
-                    redis = await get_redis_client()
-                    audio_key = data.get("audio_key")
-                    if audio_key:
-                        audio_data = await redis.get(audio_key)
-                        if audio_data:
-                            # Send audio to client
-                            await websocket.send_bytes(audio_data)
-                            # Clean up Redis
-                            await redis.delete(audio_key)
-                else:
-                    # Forward other messages to client
-                    await websocket.send_json(data)
-    
-    except asyncio.CancelledError:
-        # Task was cancelled, exit gracefully
-        await pubsub.unsubscribe()
-    
-    except Exception as e:
-        logger.error(f"Error in pubsub handler: {e}")
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+@app.on_event("startup")
+async def start_workers():
+    asyncio.create_task(start_audio_worker())

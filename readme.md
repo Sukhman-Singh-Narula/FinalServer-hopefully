@@ -1,3 +1,5 @@
+Install ffmpeg on system
+
 Complete Flow Explanation for Language Tutor System
 You're right to verify the system flow. Let me clarify exactly how data moves through the system and the role each component plays.
 Step 1: ESP Device Connection & Authentication
@@ -138,3 +140,5 @@ Fault tolerance - If a worker crashes, the data is still in Redis and can be pro
 Session isolation - Each user session has its own response channel
 
 This approach gives you a clean separation of concerns while maintaining the simplicity of Redis for both data storage and messaging.
+
+

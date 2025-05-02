@@ -1,166 +1,144 @@
-# app/worker.py
-import asyncio
+# app/rq_worker.py
 import json
 import logging
 import time
-import uuid
-import httpx
-from app.redis_client import get_redis_client, get_redis_pubsub
-from app.audio_processor import AudioProcessor, text_to_speech
-from app.config import OPENAI_API_KEY
+import os
+from redis import Redis
+from rq import Worker, Queue, Connection
+from rq.job import Job
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-async def process_audio_stream():
-    """Listen for audio notifications on the audio:stream channel"""
-    redis_client = await get_redis_client()
-    pubsub = await get_redis_pubsub()
-    
-    # Subscribe to the audio:stream channel
-    await pubsub.subscribe("audio:stream")
-    logger.info("Subscribed to audio:stream channel")
-    
-    try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                try:
-                    # Parse the message data
-                    data = json.loads(message["data"])
-                    session_id = data.get("session_id")
-                    device_id = data.get("device_id")
-                    chunk_size = data.get("chunk_size")
-                    
-                    logger.info(f"Received audio stream notification: {chunk_size} bytes from device: {device_id}")
-                    
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON in message data")
-                except Exception as e:
-                    logger.error(f"Error processing audio stream notification: {e}")
-    
-    except asyncio.CancelledError:
-        logger.info("Audio stream consumer task cancelled")
-        await pubsub.unsubscribe()
-    
-    except Exception as e:
-        logger.error(f"Unexpected error in audio stream consumer: {e}")
-        await pubsub.unsubscribe()
+# Redis connection
+redis_conn = Redis(host='localhost', port=6379, db=0)
 
-async def process_audio_keys():
-    """Listen for audio keys on the PubSub channel and process them"""
-    redis_client = await get_redis_client()
-    pubsub = await get_redis_pubsub()
+# Audio buffer management
+def process_audio_chunk(session_id, device_id, audio_key):
+    """Process a single audio chunk from Redis"""
+    logger.info(f"Processing audio chunk for session {session_id}, device {device_id}")
     
-    # Subscribe to the audio:keys channel
-    await pubsub.subscribe("audio:keys")
-    logger.info("Subscribed to audio:keys channel")
+    # Get the audio data from Redis
+    audio_data = redis_conn.get(audio_key)
     
-    try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                try:
-                    # Parse the message data
-                    data = json.loads(message["data"])
-                    session_id = data.get("session_id")
-                    device_id = data.get("device_id")
-                    audio_key = data.get("audio_key")
-                    
-                    logger.info(f"Received audio key: {audio_key} from device: {device_id}")
-                    
-                    # Retrieve the audio data from Redis
-                    audio_data = await redis_client.get(audio_key)
-                    
-                    if audio_data:
-                        # Log that we received the audio data
-                        logger.info(f"Retrieved audio data: {len(audio_data)} bytes")
-                        
-                        # Here you would typically process the audio data
-                        # For this example, we're just logging that we received it
-                        logger.info(f"Audio data from {device_id} successfully retrieved")
-                        
-                        # You could also delete the audio data from Redis if no longer needed
-                        # await redis_client.delete(audio_key)
-                    else:
-                        logger.warning(f"Audio data not found for key: {audio_key}")
-                    
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON in message data")
-                except Exception as e:
-                    logger.error(f"Error processing audio key: {e}")
+    if not audio_data:
+        logger.warning(f"Audio data not found for key: {audio_key}")
+        return {"status": "error", "message": "Audio data not found"}
     
-    except asyncio.CancelledError:
-        logger.info("Consumer task cancelled")
-        await pubsub.unsubscribe()
+    # Get or create session buffer
+    buffer_key = f"buffer:{session_id}"
+    if not redis_conn.exists(buffer_key):
+        redis_conn.set(buffer_key, b"", ex=3600)  # 1 hour expiration
     
-    except Exception as e:
-        logger.error(f"Unexpected error in consumer: {e}")
-        await pubsub.unsubscribe()
+    # Append audio data to buffer
+    redis_conn.append(buffer_key, audio_data)
+    
+    # Update session metadata
+    metadata_key = f"metadata:{session_id}"
+    metadata = {
+        "device_id": device_id,
+        "last_activity": time.time(),
+        "chunks_processed": 1
+    }
+    
+    if redis_conn.exists(metadata_key):
+        try:
+            existing_metadata = json.loads(redis_conn.get(metadata_key))
+            existing_metadata["last_activity"] = time.time()
+            existing_metadata["chunks_processed"] += 1
+            metadata = existing_metadata
+        except:
+            pass
+    
+    redis_conn.set(metadata_key, json.dumps(metadata), ex=3600)
+    
+    # Check if buffer is large enough to process
+    buffer_size = redis_conn.strlen(buffer_key)
+    logger.info(f"Buffer size for session {session_id}: {buffer_size} bytes")
+    
+    # Process buffer when it reaches threshold (e.g., 2 seconds of audio at 16kHz)
+    if buffer_size >= 64000:  # Adjust threshold based on your requirements
+        return process_audio_buffer(session_id, device_id)
+    
+    return {
+        "status": "chunk_processed",
+        "session_id": session_id,
+        "device_id": device_id,
+        "buffer_size": buffer_size
+    }
 
-async def process_audio_control():
-    """Listen for control messages on the PubSub channel"""
-    redis_client = await get_redis_client()
-    pubsub = await get_redis_pubsub()
+def process_audio_buffer(session_id, device_id):
+    """Process accumulated audio buffer"""
+    logger.info(f"Processing complete audio buffer for session {session_id}")
     
-    # Subscribe to the audio:control channel
-    await pubsub.subscribe("audio:control")
-    logger.info("Subscribed to audio:control channel")
+    # Get the buffer
+    buffer_key = f"buffer:{session_id}"
+    buffer_data = redis_conn.get(buffer_key)
     
-    try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                try:
-                    # Parse the message data
-                    data = json.loads(message["data"])
-                    session_id = data.get("session_id")
-                    device_id = data.get("device_id")
-                    command = data.get("command")
-                    
-                    logger.info(f"Received control command: {command} from device: {device_id}")
-                    
-                    # Process different commands
-                    if command == "end_stream":
-                        logger.info(f"End of stream from device: {device_id}")
-                        # Here you might want to trigger processing of the complete audio
-                        
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON in message data")
-                except Exception as e:
-                    logger.error(f"Error processing control message: {e}")
+    if not buffer_data or len(buffer_data) == 0:
+        logger.warning(f"Empty buffer for session {session_id}")
+        return {"status": "empty_buffer"}
     
-    except asyncio.CancelledError:
-        logger.info("Control listener task cancelled")
-        await pubsub.unsubscribe()
+    # Here you would process the audio data
+    # For example, convert to WAV, transcribe with Whisper, etc.
+    logger.info(f"Processing {len(buffer_data)} bytes of audio data")
     
-    except Exception as e:
-        logger.error(f"Unexpected error in control listener: {e}")
-        await pubsub.unsubscribe()
+    # For demo purposes, just log the size
+    result = {
+        "status": "buffer_processed",
+        "session_id": session_id,
+        "device_id": device_id,
+        "processed_bytes": len(buffer_data)
+    }
+    
+    # Save processing result to Redis
+    result_key = f"result:{session_id}:{time.time()}"
+    redis_conn.set(result_key, json.dumps(result), ex=3600)
+    
+    # Clear the buffer after processing
+    redis_conn.set(buffer_key, b"")
+    
+    return result
 
-async def start_audio_worker():
-    """Start all audio worker tasks"""
-    logger.info("Starting audio worker tasks...")
+def end_session(session_id, device_id, reason="client_request"):
+    """End audio processing session"""
+    logger.info(f"Ending session {session_id} for device {device_id}. Reason: {reason}")
     
-    # Create tasks for each listener
-    audio_stream_task = asyncio.create_task(process_audio_stream())
-    audio_keys_task = asyncio.create_task(process_audio_keys())
-    audio_control_task = asyncio.create_task(process_audio_control())
+    # Process any remaining audio in the buffer
+    result = process_audio_buffer(session_id, device_id)
     
-    logger.info("Audio worker tasks started successfully")
+    # Update session status
+    metadata_key = f"metadata:{session_id}"
+    if redis_conn.exists(metadata_key):
+        try:
+            metadata = json.loads(redis_conn.get(metadata_key))
+            metadata["status"] = "ended"
+            metadata["end_reason"] = reason
+            metadata["end_time"] = time.time()
+            redis_conn.set(metadata_key, json.dumps(metadata), ex=3600)
+        except:
+            pass
     
-    # Return the tasks in case we need to cancel them later
-    return [audio_stream_task, audio_keys_task, audio_control_task]
+    # Return final status
+    return {
+        "status": "session_ended",
+        "session_id": session_id,
+        "device_id": device_id,
+        "reason": reason,
+        "final_processing": result
+    }
 
-async def main():
-    """Run all consumer tasks"""
-    # Create tasks for each listener
-    tasks = await start_audio_worker()
-    
-    # Wait for all tasks to complete
-    try:
-        await asyncio.gather(*tasks)
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
+# Main worker entry point
 if __name__ == "__main__":
-    asyncio.run(main())
+    logger.info("Starting Redis Queue worker...")
+    
+    # Define which queues to listen to
+    queues = ['audio_processing']
+    
+    # Start the worker
+    with Connection(redis_conn):
+        worker = Worker(queues)
+        logger.info(f"Worker listening on queues: {', '.join(queues)}")
+        worker.work()

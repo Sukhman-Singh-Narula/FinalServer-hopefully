@@ -13,19 +13,21 @@ from app.redis_client import get_redis_client, get_redis_pubsub
 # from app.firebase_service import get_user_from_firestore
 from app.worker import start_audio_worker
 from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
-
+from redis import Redis
+from rq import Queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-app = FastAPI(title="Language Tutor WebSocket Server")
-
-
-FIREBASE_CREDENTIALS_PATH="./bern-8dbc2-firebase-adminsdk-fbsvc-f2d05b268c.json"
 SAMPLE_RATE = 8000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
+
+redis_conn = Redis(host='localhost', port=6379, db=0)
+app = FastAPI(title="Language Tutor WebSocket Server")
+audio_queue = Queue('audio', connection=redis_conn)
+stream_queues = {}
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,22 +85,32 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     await websocket.accept()
     
     # Generate a unique session ID
-    session_id = f"session:{device_id}:{int(asyncio.get_event_loop().time())}"
+    session_id = f"session:{device_id}:{int(time.time())}"
     
-    # Store connection
-    active_connections[session_id] = {
-        "websocket": websocket,
-        "device_id": device_id,
-        "last_activity": asyncio.get_event_loop().time()
-    }
+    # Create a dedicated queue for this user's audio
+    user_queue_name = f"user_{device_id}"
+    redis_conn = Redis(host='localhost', port=6379, db=0)
+    user_queue = Queue(user_queue_name, connection=redis_conn)
     
-    logger.info(f"ESP device connected: {device_id}, session: {session_id}")
+    # Store session info in Redis
+    redis_conn.set(f"session:info:{session_id}", 
+                  json.dumps({"device_id": device_id, 
+                             "queue": user_queue_name,
+                             "start_time": time.time()}),
+                  ex=3600)
+    
+    # Start a session processor for this user if not already running
+    main_queue = Queue('session_management', connection=redis_conn)
+    main_queue.enqueue(
+        'start_user_session_processor',
+        device_id=device_id,
+        session_id=session_id,
+        queue_name=user_queue_name,
+        # Avoid duplicate session processors
+        job_id=f"processor_{device_id}"
+    )
     
     try:
-        # Get Redis client
-        redis_client = await get_redis_client()
-        
-        # Process WebSocket messages
         while True:
             data = await websocket.receive()
             
@@ -106,36 +118,22 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 # Handle binary audio data
                 audio_bytes = data["bytes"]
                 
-                # Log audio chunk size
-                logger.debug(f"Received audio chunk: {len(audio_bytes)} bytes")
+                # Store in Redis with a timestamp key
+                timestamp = time.time()
+                audio_key = f"audio:{session_id}:{timestamp}"
+                redis_conn.set(audio_key, audio_bytes, ex=300)
                 
-                # Publish to Redis PubSub
-                await redis_client.publish(
-                    "audio:stream",
-                    json.dumps({
-                        "session_id": session_id,
-                        "device_id": device_id,
-                        "timestamp": asyncio.get_event_loop().time(),
-                        "chunk_size": len(audio_bytes)
-                    })
+                # Add this chunk to the user's dedicated queue
+                user_queue.enqueue(
+                    'process_user_audio_chunk',
+                    session_id=session_id,
+                    audio_key=audio_key,
+                    timestamp=timestamp,
+                    # Ensure jobs are processed in order
+                    depends_on=redis_conn.get(f"last_job:{session_id}")
                 )
                 
-                # Store actual audio bytes in Redis
-                audio_key = f"audio:{session_id}:{asyncio.get_event_loop().time()}"
-                await redis_client.set(audio_key, audio_bytes, ex=120)  # 120s expiration
-                
-                # Publish the key where the audio is stored - using the same channel name as worker.py
-                await redis_client.publish(
-                    "audio:keys",
-                    json.dumps({
-                        "session_id": session_id,
-                        "device_id": device_id,
-                        "audio_key": audio_key,
-                        "timestamp": asyncio.get_event_loop().time()
-                    })
-                )
-                
-                # Send acknowledgment for the test script
+                # Send acknowledgment
                 await websocket.send_text(json.dumps({
                     "type": "ack", 
                     "message": f"Received {len(audio_bytes)} bytes"
@@ -147,29 +145,27 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     message = json.loads(data["text"])
                     logger.info(f"Received message: {message}")
                     
-                    # Process command if needed
                     command_type = message.get("type")
                     
                     if command_type == "end_stream":
-                        # Signal end of audio stream - using the same channel name as worker.py
-                        await redis_client.publish(
-                            "audio:control",
-                            json.dumps({
-                                "session_id": session_id,
-                                "device_id": device_id,
-                                "command": "end_stream",
-                                "timestamp": asyncio.get_event_loop().time()
-                            })
+                        # Signal end of audio stream
+                        # Add a special job to the queue to signal stream end
+                        await asyncio.to_thread(
+                            session_queue.enqueue,
+                            'app.audio_processor.end_stream_processing',
+                            session_id=session_id,
+                            device_id=device_id
                         )
+                        
                         await websocket.send_text(json.dumps({
-                            "type": "info", 
+                            "type": "info",
                             "message": "Stream end acknowledged"
                         }))
                         
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON received")
                     await websocket.send_text(json.dumps({
-                        "type": "error", 
+                        "type": "error",
                         "message": "Invalid JSON"
                     }))
     
@@ -179,6 +175,18 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         if session_id in active_connections:
             del active_connections[session_id]
         
+        # Signal stream end when client disconnects
+        try:
+            await asyncio.to_thread(
+                session_queue.enqueue,
+                'app.audio_processor.end_stream_processing',
+                session_id=session_id,
+                device_id=device_id,
+                reason="disconnect"
+            )
+        except Exception as e:
+            logger.error(f"Error signaling stream end on disconnect: {e}")
+            
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         # Clean up

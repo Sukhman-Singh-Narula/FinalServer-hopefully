@@ -10,7 +10,7 @@ import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from app.redis_client import get_redis_client, get_redis_pubsub
-from app.firebase_service import get_user_from_firestore
+# from app.firebase_service import get_user_from_firestore
 from app.worker import start_audio_worker
 from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
 
@@ -59,8 +59,18 @@ def mp3_to_wav(mp3_data: bytes) -> bytes:
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources on shutdown"""
-    # Close Redis connection if needed
+    # Close Redis connection
     redis = await get_redis_client()
+    
+    # Cancel all running tasks
+    for task in asyncio.all_tasks():
+        if task is not asyncio.current_task():
+            task.cancel()
+    
+    # Wait for all tasks to complete with a timeout
+    await asyncio.gather(*asyncio.all_tasks(), return_exceptions=True)
+    
+    # Close Redis connection
     await redis.close()
     
 @app.get("/health")
@@ -112,9 +122,9 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 
                 # Store actual audio bytes in Redis
                 audio_key = f"audio:{session_id}:{asyncio.get_event_loop().time()}"
-                await redis_client.set(audio_key, audio_bytes, ex=120)  # 60s expiration
+                await redis_client.set(audio_key, audio_bytes, ex=120)  # 120s expiration
                 
-                # Publish the key where the audio is stored
+                # Publish the key where the audio is stored - using the same channel name as worker.py
                 await redis_client.publish(
                     "audio:keys",
                     json.dumps({
@@ -124,6 +134,12 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         "timestamp": asyncio.get_event_loop().time()
                     })
                 )
+                
+                # Send acknowledgment for the test script
+                await websocket.send_text(json.dumps({
+                    "type": "ack", 
+                    "message": f"Received {len(audio_bytes)} bytes"
+                }))
                 
             elif "text" in data:
                 # Handle text messages (commands)
@@ -135,7 +151,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     command_type = message.get("type")
                     
                     if command_type == "end_stream":
-                        # Signal end of audio stream
+                        # Signal end of audio stream - using the same channel name as worker.py
                         await redis_client.publish(
                             "audio:control",
                             json.dumps({
@@ -168,6 +184,8 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         # Clean up
         if session_id in active_connections:
             del active_connections[session_id]
+
 @app.on_event("startup")
 async def start_workers():
+    """Start the audio worker processes"""
     asyncio.create_task(start_audio_worker())

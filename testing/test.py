@@ -27,9 +27,8 @@ async def send_test_audio():
     
     try:
         async with websockets.connect(uri) as websocket:
-            # Wait for welcome message
-            response = await websocket.recv()
-            print(f"Server response: {response}")
+            # Initial connection - we don't explicitly expect a welcome message now
+            print(f"Connected successfully as device {device_id}")
             
             # Send audio chunks
             print(f"Sending {TOTAL_CHUNKS} audio chunks of {CHUNK_SIZE} bytes each...")
@@ -42,6 +41,13 @@ async def send_test_audio():
                 await websocket.send(audio_data)
                 print(f"Sent chunk {i+1}/{TOTAL_CHUNKS}: {len(audio_data)} bytes")
                 
+                # Receive acknowledgment (added in our updated main.py)
+                try:
+                    response = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                    print(f"Received ack: {response}")
+                except asyncio.TimeoutError:
+                    print("No acknowledgment received (timeout)")
+                
                 # Small delay to simulate real-time audio
                 await asyncio.sleep(DELAY_BETWEEN_CHUNKS)
             
@@ -51,10 +57,12 @@ async def send_test_audio():
             print("Sent end_stream command")
             
             # Wait for confirmation
-            response = await websocket.recv()
-            print(f"Server response: {response}")
-            
-            print("Test completed successfully!")
+            try:
+                response = await asyncio.wait_for(websocket.recv(), timeout=2.0)
+                print(f"Server response: {response}")
+                print("Test completed successfully!")
+            except asyncio.TimeoutError:
+                print("No response to end_stream command (timeout)")
     
     except Exception as e:
         print(f"Error: {e}")

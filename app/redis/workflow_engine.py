@@ -2,7 +2,7 @@
 import json
 import logging
 import asyncio
-from app.redis_client import get_redis_client
+from app.redis.redis_client import get_redis_client
 # from app.openai_service import transcribe_audio, generate_speech
 
 logger = logging.getLogger(__name__)

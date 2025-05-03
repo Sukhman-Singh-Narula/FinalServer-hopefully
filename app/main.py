@@ -9,9 +9,9 @@ import logging
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from app.redis_client import get_redis_client, get_redis_pubsub
+from app.redis.redis_client import get_redis_client, get_redis_pubsub
 # from app.firebase_service import get_user_from_firestore
-from app.worker import start_audio_worker
+from app.redis.worker import start_audio_worker
 from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
 from redis import Redis
 from rq import Queue
@@ -27,7 +27,7 @@ redis_conn = Redis(host='localhost', port=6379, db=0)
 app = FastAPI(title="Language Tutor WebSocket Server")
 audio_queue = Queue('audio', connection=redis_conn)
 stream_queues = {}
-
+session_queue = Queue('session_management', connection=redis_conn)
 
 app.add_middleware(
     CORSMiddleware,

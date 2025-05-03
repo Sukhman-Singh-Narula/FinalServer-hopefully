@@ -3,9 +3,9 @@ import asyncio
 import logging
 import uvicorn
 from app.main import app
-from app.redis_client import get_redis_client
+from app.redis.redis_client import get_redis_client
 # from app.syllabus_manager import SyllabusManager
-from app.workflow_engine import WorkflowEngine
+from app.redis.workflow_engine import WorkflowEngine
 
 async def setup():
     """Perform setup tasks before starting server"""

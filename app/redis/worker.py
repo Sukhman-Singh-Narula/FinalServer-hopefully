@@ -1,10 +1,10 @@
-# app/rq_worker.py
+# app/worker.py
 import json
 import logging
 import time
 import os
 from redis import Redis
-from rq import Worker, Queue, Connection
+from rq import Worker, Queue
 from rq.job import Job
 
 # Configure logging
@@ -130,6 +130,39 @@ def end_session(session_id, device_id, reason="client_request"):
         "final_processing": result
     }
 
+# Function to start a worker for a specific queue
+def start_worker(queue_names):
+    """Start a worker to process jobs from the specified queues"""
+    logger.info(f"Starting worker for queues: {', '.join(queue_names)}")
+    
+    # Create worker with explicit connection
+    worker = Worker(
+        [Queue(name, connection=redis_conn) for name in queue_names],
+        connection=redis_conn
+    )
+    
+    # Start processing jobs
+    logger.info(f"Worker listening on queues: {', '.join(queue_names)}")
+    worker.work()
+
+# Function to start an audio worker process
+async def start_audio_worker():
+    """Start the audio worker process asynchronously"""
+    import asyncio
+    import multiprocessing
+    
+    logger.info("Starting audio worker process...")
+    
+    # Create and start worker in a separate process
+    process = multiprocessing.Process(
+        target=start_worker,
+        args=(['audio_processing'],)
+    )
+    process.start()
+    
+    logger.info(f"Audio worker process started with PID: {process.pid}")
+    return process
+
 # Main worker entry point
 if __name__ == "__main__":
     logger.info("Starting Redis Queue worker...")
@@ -137,8 +170,5 @@ if __name__ == "__main__":
     # Define which queues to listen to
     queues = ['audio_processing']
     
-    # Start the worker
-    with Connection(redis_conn):
-        worker = Worker(queues)
-        logger.info(f"Worker listening on queues: {', '.join(queues)}")
-        worker.work()
+    # Start the worker with explicit connection
+    start_worker(queues)

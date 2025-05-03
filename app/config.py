@@ -16,7 +16,3 @@ FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
 
 # OpenAI configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-
-# Audio settings
-SAMPLE_RATE = 24000
-AUDIO_CHANNELS = 1

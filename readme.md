@@ -1,5 +1,10 @@
 Install ffmpeg on system
-redis on server
+redis install using docker
+npm i
+python run.py
+python start_workers.py
+
+
 
 Complete Flow Explanation for Language Tutor System
 You're right to verify the system flow. Let me clarify exactly how data moves through the system and the role each component plays.

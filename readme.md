@@ -1,4 +1,5 @@
 Install ffmpeg on system
+redis on server
 
 Complete Flow Explanation for Language Tutor System
 You're right to verify the system flow. Let me clarify exactly how data moves through the system and the role each component plays.

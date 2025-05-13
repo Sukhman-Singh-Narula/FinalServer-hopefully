@@ -86,6 +86,8 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     
     # Generate a unique session ID
     session_id = f"session:{device_id}:{int(time.time())}"
+    session_id = session_id.replace(":", "_")
+    logger.info(f"New WebSocket connection: device_id={device_id}, session_id={session_id}")
     
     # Create a dedicated queue for this user's audio
     user_queue_name = f"user_{device_id}"
@@ -94,21 +96,25 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     
     # Store session info in Redis
     redis_conn.set(f"session:info:{session_id}", 
-                  json.dumps({"device_id": device_id, 
-                             "queue": user_queue_name,
-                             "start_time": time.time()}),
+                  json.dumps({
+                      "device_id": device_id, 
+                      "queue": user_queue_name,
+                      "start_time": time.time()
+                  }),
                   ex=3600)
     
-    # Start a session processor for this user if not already running
+    # Start a session processor for this user
     main_queue = Queue('session_management', connection=redis_conn)
     main_queue.enqueue(
-        'start_user_session_processor',
+        'app.audio_processor.start_user_session_processor',
         device_id=device_id,
         session_id=session_id,
         queue_name=user_queue_name,
-        # Avoid duplicate session processors
-        job_id=f"processor_{device_id}"
+        job_id=f"processor_{device_id}_{session_id}"
     )
+    
+    # Track this connection
+    active_connections[session_id] = websocket
     
     try:
         while True:
@@ -124,14 +130,15 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 redis_conn.set(audio_key, audio_bytes, ex=300)
                 
                 # Add this chunk to the user's dedicated queue
-                user_queue.enqueue(
-                    'process_user_audio_chunk',
+                job = user_queue.enqueue(
+                    'app.audio_processor.process_user_audio_chunk',
                     session_id=session_id,
                     audio_key=audio_key,
-                    timestamp=timestamp,
-                    # Ensure jobs are processed in order
-                    depends_on=redis_conn.get(f"last_job:{session_id}")
+                    timestamp=timestamp
                 )
+                
+                # Save the last job ID for dependencies if needed
+                redis_conn.set(f"last_job:{session_id}", job.id, ex=300)
                 
                 # Send acknowledgment
                 await websocket.send_text(json.dumps({
@@ -140,7 +147,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 }))
                 
             elif "text" in data:
-                # Handle text messages (commands)
                 try:
                     message = json.loads(data["text"])
                     logger.info(f"Received message: {message}")
@@ -149,7 +155,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     
                     if command_type == "end_stream":
                         # Signal end of audio stream
-                        # Add a special job to the queue to signal stream end
                         await asyncio.to_thread(
                             session_queue.enqueue,
                             'app.audio_processor.end_stream_processing',
@@ -170,7 +175,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                     }))
     
     except WebSocketDisconnect:
-        logger.info(f"ESP device disconnected: {device_id}")
+        logger.info(f"ESP device disconnected: {device_id}, session: {session_id}")
         # Clean up
         if session_id in active_connections:
             del active_connections[session_id]

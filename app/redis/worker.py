@@ -4,7 +4,7 @@ import logging
 import time
 import os
 from redis import Redis
-from rq import Worker, Queue
+from rq import Queue, SimpleWorker
 from rq.job import Job
 
 # Configure logging
@@ -136,10 +136,13 @@ def start_worker(queue_names):
     logger.info(f"Starting worker for queues: {', '.join(queue_names)}")
     
     # Create worker with explicit connection
-    worker = Worker(
-        [Queue(name, connection=redis_conn) for name in queue_names],
-        connection=redis_conn
-    )
+    worker = SimpleWorker(
+    [Queue(name, connection=redis_conn) for name in queue_names],
+    connection=redis_conn
+)
+
+
+
     
     # Start processing jobs
     logger.info(f"Worker listening on queues: {', '.join(queue_names)}")

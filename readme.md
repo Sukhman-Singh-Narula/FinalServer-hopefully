@@ -1,9 +1,6 @@
 Install ffmpeg on system
 redis install using docker
 npm i
-python run.py
-python start_workers.py
-
 
 run 1. run.py
     2. start_workers.py

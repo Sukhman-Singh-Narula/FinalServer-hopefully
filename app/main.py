@@ -1,6 +1,4 @@
-import os
 import time
-import uvicorn
 import wave
 from io import BytesIO
 from pydub import AudioSegment
@@ -10,11 +8,13 @@ import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from app.redis.redis_client import get_redis_client, get_redis_pubsub
-# from app.firebase_service import get_user_from_firestore
 from app.redis.worker import start_audio_worker
 from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
 from redis import Redis
 from rq import Queue
+from app.firebase_service import initialize_firebase, get_user_from_firestore
+from app.syllabus_manager import SyllabusManager
+from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -116,6 +116,14 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     # Track this connection
     active_connections[session_id] = websocket
     
+    # Create PubSub subscription for agent responses
+    pubsub = redis_conn.pubsub()
+    pubsub.subscribe(f"agent:updates:{session_id}")
+    
+    # Start background task to listen for agent responses
+    background_tasks = BackgroundTasks()
+    background_tasks.add_task(listen_for_agent_responses, pubsub, websocket, session_id)
+    
     try:
         while True:
             data = await websocket.receive()
@@ -167,6 +175,28 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             "message": "Stream end acknowledged"
                         }))
                         
+                    elif command_type == "text_input":
+                        # Handle direct text input (for testing/fallback)
+                        text_content = message.get("content", "")
+                        if text_content:
+                            # Create a key to store the text
+                            text_key = f"text:{session_id}:{time.time()}"
+                            redis_conn.set(text_key, text_content, ex=300)
+                            
+                            # Process directly with agent (skip audio processing)
+                            agent_queue = Queue('agent_processing', connection=redis_conn)
+                            agent_job = agent_queue.enqueue(
+                                'app.agent_worker.process_text_input',
+                                session_id=session_id,
+                                text_key=text_key,
+                                job_id=f"text_input_{session_id}_{time.time()}"
+                            )
+                            
+                            await websocket.send_text(json.dumps({
+                                "type": "info",
+                                "message": "Text input received and being processed"
+                            }))
+                        
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON received")
                     await websocket.send_text(json.dumps({
@@ -198,7 +228,76 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         if session_id in active_connections:
             del active_connections[session_id]
 
+# Add this function for agent response handling
+async def listen_for_agent_responses(pubsub, websocket, session_id):
+    """Listen for agent responses from Redis PubSub"""
+    try:
+        logger.info(f"Starting agent response listener for session {session_id}")
+        # Process any messages already in the queue
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    # Parse message data
+                    data = json.loads(message['data'])
+                    message_type = data.get('type')
+                    
+                    if message_type == 'response':
+                        # Send response to client
+                        response = data.get('data', {})
+                        text_response = response.get('response', '')
+                        
+                        if text_response:
+                            await websocket.send_text(json.dumps({
+                                "type": "agent_response",
+                                "message": text_response
+                            }))
+                    
+                    elif message_type == 'session_ended':
+                        # Notify client that session has ended
+                        await websocket.send_text(json.dumps({
+                            "type": "session_ended",
+                            "message": "Session has ended"
+                        }))
+                        break
+                
+                except json.JSONDecodeError:
+                    logger.error("Invalid JSON in Redis message")
+                except Exception as e:
+                    logger.error(f"Error processing Redis message: {e}")
+    
+    except Exception as e:
+        logger.error(f"Error in agent response listener: {e}")
+    finally:
+        # Clean up
+        pubsub.unsubscribe()
+        logger.info(f"Agent response listener for session {session_id} stopped")
+
+@app.get("/agent/user/{user_id}")
+async def get_user_data(user_id: str):
+    """Get user data from Firestore"""
+    user_data = get_user_from_firestore(user_id)
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_data
+
+@app.get("/agent/games")
+async def get_available_games():
+    """Get list of available language games"""
+    syllabus = SyllabusManager()
+    await syllabus.initialize()
+    games = syllabus.get_all_games()
+    return games
+
+
 @app.on_event("startup")
-async def start_workers():
-    """Start the audio worker processes"""
+async def startup_event():
+    """Initialize application components on startup"""
+    # Initialize Firebase
+    initialize_firebase()
+    
+    # Initialize Syllabus Manager
+    syllabus = SyllabusManager()
+    await syllabus.initialize()
+    
+    # Start the audio worker processes
     asyncio.create_task(start_audio_worker())

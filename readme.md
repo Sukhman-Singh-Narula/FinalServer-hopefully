@@ -1,8 +1,9 @@
 Install ffmpeg on system
 redis on server
+run 1. run.py
+    2. start_workers.py
+    3. monitor_worker.py
 
-Complete Flow Explanation for Language Tutor System
-You're right to verify the system flow. Let me clarify exactly how data moves through the system and the role each component plays.
 Step 1: ESP Device Connection & Authentication
 When an ESP device connects:
 

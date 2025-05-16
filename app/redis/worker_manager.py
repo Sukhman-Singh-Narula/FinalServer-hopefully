@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Redis connection
 redis_conn = redis.Redis(host='localhost', port=6379, db=0)
-
+AGENT_WORKERS = int(os.getenv("AGENT_WORKERS", 2))
 # Process tracking
 worker_processes = {}
 
@@ -58,6 +58,23 @@ def monitor_user_queues():
     for key in redis_conn.keys('rq:queue:user_*'):
         queue_name = key.decode('utf-8').replace('rq:queue:', '')
         user_queues.add(queue_name)
+    
+    # Add agent queue if not already monitored
+    agent_queue = 'agent_processing'
+    if not any(key.startswith(agent_queue) for key in worker_processes.keys()):
+        for i in range(AGENT_WORKERS):
+            process = Process(
+                target=start_worker_for_queue,
+                args=(agent_queue,),
+                name=f"worker-{agent_queue}_{i}"
+            )
+            process.daemon = True
+            process.start()
+            logger.info(f"Started agent worker {i} with PID: {process.pid}")
+            worker_processes[f'{agent_queue}_{i}'] = {
+                'process': process,
+                'start_time': time.time()
+            }
     
     # Start a worker for each user queue if not already running
     for queue in user_queues:
@@ -128,6 +145,21 @@ if __name__ == "__main__":
         'process': audio_process,
         'start_time': time.time()
     }
+    
+    # Start workers for the agent processing queue
+    for i in range(AGENT_WORKERS):
+        agent_process = Process(
+            target=start_worker_for_queue,
+            args=('agent_processing',),
+            name=f"worker-agent_processing_{i}"
+        )
+        agent_process.daemon = True
+        agent_process.start()
+        logger.info(f"Started agent processing worker {i} with PID: {agent_process.pid}")
+        worker_processes[f'agent_processing_{i}'] = {
+            'process': agent_process,
+            'start_time': time.time()
+        }
     
     try:
         # Monitor for new user queues and manage workers

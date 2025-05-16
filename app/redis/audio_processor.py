@@ -1,24 +1,20 @@
-# app/audio_processor.py
-import logging
-import time
-import json
-import redis
-from io import BytesIO
-import wave
+# Modifications needed for app/redis/audio_processor.py
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger(__name__)
+"""
+This file provides the changes needed to update the existing audio_processor.py file
+to integrate with the agent_worker.py functionality.
 
-# Redis connection
-redis_conn = redis.Redis(host='localhost', port=6379, db=0)
+Replace or merge these functions with your existing code.
+"""
 
-# Audio settings
-SAMPLE_RATE = 8000
-CHANNELS = 1
-SAMPLE_WIDTH = 2
+# Add to imports:
+from app.agent_worker import (
+    initialize_agent_session, 
+    process_audio, 
+    end_agent_session
+)
 
+# Updated process_user_audio_chunk function with agent integration
 def process_user_audio_chunk(session_id, audio_key, timestamp):
     """
     Process a single audio chunk for a user
@@ -64,29 +60,6 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
     # Execute all Redis commands
     pipe.execute()
     
-    # Get current stats
-    stats = redis_conn.hgetall(stats_key)
-    
-    # Convert byte keys/values to strings/numbers
-    formatted_stats = {}
-    for k, v in stats.items():
-        key = k.decode('utf-8') if isinstance(k, bytes) else k
-        try:
-            # Try to convert to number if possible
-            value = float(v) if isinstance(v, bytes) else v
-            # Convert timestamps to readable format
-            if "time" in key and not isinstance(v, bytes):
-                time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
-                formatted_stats[f"{key}_str"] = time_str
-        except:
-            value = v.decode('utf-8') if isinstance(v, bytes) else v
-        
-        formatted_stats[key] = value
-    
-    # Display stats
-    logger.info(f"Session {session_id} stats: Chunks processed: {formatted_stats.get('chunks_processed', 0)}, "
-               f"Last chunk size: {formatted_stats.get('last_chunk_size', 0)} bytes")
-    
     # Add this chunk to the accumulated buffer
     buffer_key = f"buffer:{session_id}"
     redis_conn.append(buffer_key, audio_data)
@@ -99,7 +72,38 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
     # If buffer reaches threshold, process it
     # Threshold: 2 seconds of audio at 8kHz, 16-bit mono = 32000 bytes
     if buffer_size >= 32000:
-        return process_audio_buffer(session_id, device_id)
+        # Process the audio buffer
+        buffer_result = process_audio_buffer(session_id, device_id)
+        
+        # Get the buffer data before clearing it
+        buffer_data = redis_conn.get(buffer_key)
+        
+        # Create a key for the agent to process
+        agent_audio_key = f"agent:audio:{session_id}:{time.time()}"
+        redis_conn.set(agent_audio_key, buffer_data, ex=300)  # 5 min expiration
+        
+        # Queue the buffer for processing by the agent worker
+        agent_queue = Queue('agent_processing', connection=redis_conn)
+        agent_job = agent_queue.enqueue(
+            'app.agent_worker.process_audio',
+            session_id=session_id,
+            audio_key=agent_audio_key,
+            job_id=f"agent_job_{session_id}_{time.time()}"
+        )
+        
+        logger.info(f"Queued agent processing job {agent_job.id} for session {session_id}")
+        
+        # Clear the buffer for the next chunk
+        redis_conn.set(buffer_key, b"")
+        
+        return {
+            "status": "processed_with_agent",
+            "session_id": session_id,
+            "device_id": device_id,
+            "buffer_size": buffer_size,
+            "agent_job_id": agent_job.id,
+            "timestamp": timestamp
+        }
     
     return {
         "status": "processed",
@@ -110,6 +114,7 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
         "timestamp": timestamp
     }
 
+# Updated process_audio_buffer function
 def process_audio_buffer(session_id, device_id):
     """Process the accumulated audio buffer when it reaches sufficient size"""
     logger.info(f"Processing complete audio buffer for session {session_id}")
@@ -122,10 +127,7 @@ def process_audio_buffer(session_id, device_id):
         logger.warning(f"Empty buffer for session {session_id}")
         return {"status": "empty_buffer"}
     
-    # For this task, we just want to display information about the buffer
-    # In a real implementation, you would use a speech-to-text service here
-    
-    # Convert PCM data to WAV for analysis (not actually using the WAV, just for stats)
+    # Convert PCM data to WAV for analysis
     wav_buffer = BytesIO()
     with wave.open(wav_buffer, 'wb') as wav_file:
         wav_file.setnchannels(CHANNELS)
@@ -165,11 +167,55 @@ def process_audio_buffer(session_id, device_id):
     pipe.hset(stats_key, "last_buffer_process_time", time.time())
     pipe.execute()
     
-    # Clear the buffer for the next chunk of audio
-    redis_conn.set(buffer_key, b"")
+    # Don't clear the buffer here - it will be processed by the agent worker
+    # and cleared after that
     
     return result
 
+# Updated start_user_session_processor function
+def start_user_session_processor(device_id, session_id, queue_name):
+    """Initialize session processing for a user"""
+    logger.info(f"Starting session processor for device {device_id}, session {session_id}")
+    
+    # Create session state
+    session_state_key = f"session:state:{session_id}"
+    state = {
+        "active": True,
+        "start_time": time.time(),
+        "device_id": device_id,
+        "queue_name": queue_name
+    }
+    redis_conn.set(session_state_key, json.dumps(state), ex=3600)
+    
+    # Initialize statistics
+    stats_key = f"stats:{session_id}"
+    pipe = redis_conn.pipeline()
+    pipe.hset(stats_key, "start_time", time.time())
+    pipe.hset(stats_key, "device_id", device_id)
+    pipe.hset(stats_key, "chunks_processed", 0)
+    pipe.hset(stats_key, "buffers_processed", 0)
+    pipe.execute()
+    
+    # Initialize agent session
+    agent_queue = Queue('agent_processing', connection=redis_conn)
+    agent_job = agent_queue.enqueue(
+        'app.agent_worker.initialize_agent_session',
+        session_id=session_id,
+        device_id=device_id,
+        job_id=f"init_agent_{session_id}"
+    )
+    
+    logger.info(f"Queued agent initialization job {agent_job.id} for session {session_id}")
+    
+    return {
+        "status": "initialized",
+        "session_id": session_id,
+        "device_id": device_id,
+        "queue_name": queue_name,
+        "agent_job_id": agent_job.id
+    }
+
+# Updated end_stream_processing function
 def end_stream_processing(session_id, device_id, reason="client_signal"):
     """End the audio stream processing and process any remaining buffer"""
     logger.info(f"Ending stream processing for session {session_id}, device {device_id}. Reason: {reason}")
@@ -178,6 +224,27 @@ def end_stream_processing(session_id, device_id, reason="client_signal"):
     buffer_key = f"buffer:{session_id}"
     if redis_conn.exists(buffer_key) and redis_conn.strlen(buffer_key) > 0:
         result = process_audio_buffer(session_id, device_id)
+        
+        # Get the buffer data
+        buffer_data = redis_conn.get(buffer_key)
+        
+        # Create a key for the agent to process
+        agent_audio_key = f"agent:audio:{session_id}:{time.time()}"
+        redis_conn.set(agent_audio_key, buffer_data, ex=300)
+        
+        # Queue final buffer for processing
+        agent_queue = Queue('agent_processing', connection=redis_conn)
+        agent_job = agent_queue.enqueue(
+            'app.agent_worker.process_audio',
+            session_id=session_id,
+            audio_key=agent_audio_key,
+            job_id=f"final_agent_{session_id}_{time.time()}"
+        )
+        
+        logger.info(f"Queued final agent processing job {agent_job.id}")
+        
+        # Clear the buffer
+        redis_conn.set(buffer_key, b"")
     else:
         result = {"status": "no_remaining_buffer"}
     
@@ -190,6 +257,17 @@ def end_stream_processing(session_id, device_id, reason="client_signal"):
         "device_id": device_id
     }
     redis_conn.set(session_state_key, json.dumps(state), ex=3600)
+    
+    # End agent session
+    agent_queue = Queue('agent_processing', connection=redis_conn)
+    agent_job = agent_queue.enqueue(
+        'app.agent_worker.end_agent_session',
+        session_id=session_id,
+        reason=reason,
+        job_id=f"end_agent_{session_id}"
+    )
+    
+    logger.info(f"Queued agent session end job {agent_job.id}")
     
     # Final session statistics
     stats_key = f"stats:{session_id}"
@@ -222,37 +300,4 @@ def end_stream_processing(session_id, device_id, reason="client_signal"):
         "device_id": device_id,
         "reason": reason,
         "final_result": result
-    }
-
-def start_user_session_processor(device_id, session_id, queue_name):
-    """Initialize session processing for a user"""
-    logger.info(f"Starting session processor for device {device_id}, session {session_id}")
-    
-    # Create session state
-    session_state_key = f"session:state:{session_id}"
-    state = {
-        "active": True,
-        "start_time": time.time(),
-        "device_id": device_id,
-        "queue_name": queue_name
-    }
-    redis_conn.set(session_state_key, json.dumps(state), ex=3600)
-    
-    # Initialize statistics
-    stats_key = f"stats:{session_id}"
-    pipe = redis_conn.pipeline()
-    pipe.hset(stats_key, "start_time", time.time())
-    pipe.hset(stats_key, "device_id", device_id)
-    pipe.hset(stats_key, "chunks_processed", 0)
-    pipe.hset(stats_key, "buffers_processed", 0)
-    pipe.execute()
-    
-    # Log the initialization
-    logger.info(f"Initialized session processor for {device_id}. Ready to process audio.")
-    
-    return {
-        "status": "initialized",
-        "session_id": session_id,
-        "device_id": device_id,
-        "queue_name": queue_name
     }

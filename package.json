@@ -1,0 +1,15 @@
+{
+  "name": "finalserver-hopefully-main",
+  "version": "1.0.0",
+  "description": "Install ffmpeg on system redis install using docker npm i python run.py python start_workers.py",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

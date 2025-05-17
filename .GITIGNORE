@@ -4,3 +4,4 @@ SystemDesign.svg
 __pycache__/
 .venv/
 sukhman.md
+node_modules/

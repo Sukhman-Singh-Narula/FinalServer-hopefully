@@ -1,5 +1,9 @@
 {
+<<<<<<< HEAD
   "name": "vite-react-typescript-starter",
+=======
+  "name": "voice-recording-app",
+>>>>>>> e12212dfdbe338639139297619e8feb462c7dfaf
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -30,4 +34,8 @@
     "typescript-eslint": "^8.3.0",
     "vite": "^5.4.2"
   }
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> e12212dfdbe338639139297619e8feb462c7dfaf

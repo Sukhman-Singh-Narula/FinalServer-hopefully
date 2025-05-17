@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import React, { useState } from 'react';
 import TestComponent from './components/TestComponent';
 import ConversationInterface from './components/ConversationInterface';
@@ -44,6 +45,26 @@ function App() {
       {/* Debug Panel */}
       <DebugPanel />
     </div>
+=======
+import React from 'react';
+import Header from './components/Header';
+import AudioRecorder from './components/AudioRecorder';
+import { WebSocketProvider } from './contexts/WebSocketContext';
+
+function App() {
+  return (
+    <WebSocketProvider>
+      <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 flex flex-col">
+        <Header />
+        <main className="flex-1 flex items-center justify-center p-4">
+          <AudioRecorder />
+        </main>
+        <footer className="text-center text-gray-500 text-sm py-4">
+          <p>© {new Date().getFullYear()} AI Voice Assistant</p>
+        </footer>
+      </div>
+    </WebSocketProvider>
+>>>>>>> e12212dfdbe338639139297619e8feb462c7dfaf
   );
 }
 

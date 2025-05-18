@@ -6,9 +6,9 @@ import logging
 import signal
 import time
 
-# Configure logging
+# Configure logging - minimal output
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Only show warnings and errors
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler()]
 )
@@ -21,49 +21,48 @@ def start_worker_manager():
     """Start the worker manager as a subprocess"""
     global worker_manager_process
     
-    logger.info("Starting worker manager...")
+    print("Starting worker manager...")
     
-    # Start the worker manager
+    # Start the worker manager with minimal output
     worker_manager_process = subprocess.Popen(
         [sys.executable, "app/redis/worker_manager.py"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,  # Suppress standard output
+        stderr=subprocess.PIPE,      # Only capture errors
         universal_newlines=True,
         bufsize=1
     )
     
-    logger.info(f"Worker manager started with PID: {worker_manager_process.pid}")
+    print(f"Worker manager started with PID: {worker_manager_process.pid}")
     
     # Return the process
     return worker_manager_process
 
 def monitor_process_output(process):
-    """Monitor and log output from a subprocess"""
+    """Monitor for critical errors only"""
     while True:
-        output = process.stdout.readline()
-        if output == '' and process.poll() is not None:
+        error = process.stderr.readline()
+        if error == '' and process.poll() is not None:
             break
-        if output:
-            logger.info(output.strip())
+        
+        if error and 'ERROR' in error:
+            print(f"ERROR: {error.strip()}")
     
     # Process has terminated
-    rc = process.poll()
-    logger.info(f"Process exited with return code: {rc}")
-    return rc
+    exit_code = process.poll()
+    print(f"Process exited with return code: {exit_code}")
+    return exit_code
 
 def handle_signal(signum, frame):
     """Handle termination signals"""
     global worker_manager_process
     
-    logger.info(f"Received signal {signum}, shutting down...")
+    print(f"Received signal {signum}, shutting down...")
     
     if worker_manager_process:
-        logger.info(f"Terminating worker manager (PID: {worker_manager_process.pid})")
+        print(f"Terminating worker manager (PID: {worker_manager_process.pid})")
         try:
             worker_manager_process.terminate()
-            # Wait a bit for graceful shutdown
             time.sleep(2)
-            # Force kill if still running
             if worker_manager_process.poll() is None:
                 worker_manager_process.kill()
         except:
@@ -72,7 +71,7 @@ def handle_signal(signum, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
-    logger.info("Starting worker system...")
+    print("Starting worker system...")
     
     # Register signal handlers
     signal.signal(signal.SIGINT, handle_signal)
@@ -82,24 +81,23 @@ if __name__ == "__main__":
         # Start worker manager
         process = start_worker_manager()
         
-        # Monitor its output
+        # Only monitor for errors
         monitor_process_output(process)
         
         # If we get here, worker manager exited
-        logger.error("Worker manager exited unexpectedly")
+        print("Worker manager exited - restarting...")
         
         # Try to restart it
         while True:
-            logger.info("Restarting worker manager in 5 seconds...")
+            print("Restarting worker manager...")
             time.sleep(5)
             process = start_worker_manager()
             monitor_process_output(process)
     
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received, shutting down...")
+        print("Keyboard interrupt received, shutting down...")
         handle_signal(signal.SIGINT, None)
     
     except Exception as e:
-        logger.error(f"Error in main process: {e}")
-        # Try to clean up
+        print(f"Error in main process: {e}")
         handle_signal(signal.SIGTERM, None)

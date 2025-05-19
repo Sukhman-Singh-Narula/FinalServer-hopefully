@@ -3,6 +3,7 @@ import os
 import logging
 import firebase_admin
 from firebase_admin import credentials, firestore
+from typing import Dict, Any, Optional, List
 from app.config import FIREBASE_CREDENTIALS_PATH
 
 # Configure logging
@@ -45,7 +46,7 @@ def initialize_firebase():
         logger.error(f"Error getting Firestore client: {e}")
         return None
 
-def get_user_from_firestore(user_id):
+def get_user_from_firestore(user_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve user information from Firestore
     
     Args:
@@ -65,12 +66,19 @@ def get_user_from_firestore(user_id):
             return user_doc.to_dict()
         else:
             logger.info(f"User {user_id} not found in Firestore")
-            return None
+            # Return default empty user structure
+            return {
+                'name': None,
+                'age': None,
+                'language': 'Spanish',
+                'proficiency': 'Beginner',
+                'vocabulary': {}
+            }
     except Exception as e:
         logger.error(f"Error retrieving user from Firestore: {e}")
         return None
 
-def add_user_to_firestore(user_id, **user_data):
+def add_user_to_firestore(user_id: str, **user_data) -> bool:
     """Add or update user information in Firestore
     
     Args:
@@ -93,7 +101,7 @@ def add_user_to_firestore(user_id, **user_data):
         logger.error(f"Error saving user to Firestore: {e}")
         return False
 
-def get_all_prompts():
+def get_all_prompts() -> Dict[str, str]:
     """Retrieve all prompts from Firestore
     
     Returns:
@@ -121,3 +129,47 @@ def get_all_prompts():
     except Exception as e:
         logger.error(f"Error retrieving prompts from Firestore: {e}")
         return {}
+
+def save_vocabulary_word(user_id: str, word: str, translation: str, context: str = "") -> bool:
+    """Save a vocabulary word for a user
+    
+    Args:
+        user_id: The ID of the user
+        word: Spanish vocabulary word
+        translation: English translation
+        context: Optional context about how the word was learned
+        
+    Returns:
+        Boolean indicating success
+    """
+    db = initialize_firebase()
+    if not db:
+        logger.error("Firebase not initialized. Cannot save vocabulary.")
+        return False
+    
+    try:
+        # Get current vocabulary
+        user_ref = db.collection('Users').document(user_id)
+        user_doc = user_ref.get()
+        
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            vocabulary = user_data.get('vocabulary', {})
+        else:
+            vocabulary = {}
+        
+        # Add new word
+        vocabulary[word] = {
+            "translation": translation,
+            "context": context,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        }
+        
+        # Update vocabulary
+        user_ref.set({"vocabulary": vocabulary}, merge=True)
+        
+        logger.info(f"Vocabulary word '{word}' saved for user {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving vocabulary word: {e}")
+        return False

@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 class SyllabusManager:
-    """Manager for educational content and prompts"""
+    """Manager for Spanish language tutor content and prompts"""
     
     def __init__(self):
         self.prompts = {}
@@ -20,6 +20,7 @@ class SyllabusManager:
     
     async def initialize(self):
         """Load all prompts and initialize the syllabus"""
+        # Get prompts from Firebase
         self.prompts = get_all_prompts()
         if not self.prompts:
             logger.error("Failed to load prompts from Firebase")
@@ -58,13 +59,15 @@ class SyllabusManager:
     
     def _detect_game_prompts(self):
         """Detect game prompts and extract metadata"""
+        # Pattern for detecting game prompt IDs (looking for *_GAME_PROMPT pattern)
         game_pattern = re.compile(r'(.+)_GAME_PROMPT$')
         
+        # Look for standard game prompts
         for prompt_id, content in self.prompts.items():
             match = game_pattern.match(prompt_id)
             
             if match:
-                game_id = match.group(1)  # Extract the game name
+                game_id = match.group(1)  # Extract the game name part
                 
                 # Extract game name from content (first line often has it)
                 name = game_id.replace("_", " ")  # Default name
@@ -94,6 +97,31 @@ class SyllabusManager:
                 }
                 
                 logger.info(f"Detected game: {game_id} - {name}")
+        
+        # Manually handle special cases for backward compatibility
+        if "CAR_GAME_PROMPT" in self.prompts and "CAR" not in self.games:
+            self.games["CAR"] = {
+                "id": "CAR",
+                "name": "Spanish Road Trip",
+                "description": "Take a magical car journey and learn Spanish words for colors, animals, and objects!",
+                "prompt_id": "CAR_GAME_PROMPT"
+            }
+        
+        if "ISLAND_GAME_PROMPT" in self.prompts and "ISLAND" not in self.games:
+            self.games["ISLAND"] = {
+                "id": "ISLAND",
+                "name": "Pirate Island Adventure",
+                "description": "Sail between islands as a pirate and discover Spanish treasure words!",
+                "prompt_id": "ISLAND_GAME_PROMPT"
+            }
+        
+        if "ZOO_GAME_PROMPT" in self.prompts and "ZOO" not in self.games:
+            self.games["ZOO"] = {
+                "id": "ZOO",
+                "name": "Zoo Adventure",
+                "description": "Visit a magical zoo and learn Spanish animal names and sounds!",
+                "prompt_id": "ZOO_GAME_PROMPT"
+            }
     
     def get_prompt(self, prompt_id: str) -> str:
         """Get a prompt by ID"""
@@ -148,25 +176,15 @@ class SyllabusManager:
         Returns:
             Success status
         """
-        from app.firebase_service import add_user_to_firestore
-        import time
+        from app.firebase_service import save_vocabulary_word
         
         try:
-            # Get existing vocabulary
-            user_data = self.get_user_data(user_id)
-            vocabulary = user_data.get("vocabulary", {})
-            
-            # Add new word
-            vocabulary[word] = {
-                "translation": translation,
-                "context": context,
-                "timestamp": time.time()
-            }
-            
-            # Update user data
-            success = add_user_to_firestore(
+            # Save vocabulary word to Firebase
+            success = save_vocabulary_word(
                 user_id=user_id,
-                vocabulary=vocabulary
+                word=word,
+                translation=translation,
+                context=context
             )
             
             return success

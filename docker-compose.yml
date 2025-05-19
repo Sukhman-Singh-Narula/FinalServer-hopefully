@@ -1,0 +1,45 @@
+services:
+  # Redis service - for message broker and cache
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # Main application - handles WebSocket connections
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FIREBASE_CREDENTIALS_PATH=/app/bern-8dbc2-firebase-adminsdk-fbsvc-f2d05b268c.json
+    volumes:
+      - .:/app  # Maps current directory to /app in container
+    command: python run.py
+    restart: unless-stopped
+
+  # Direct processor - handles audio processing without RQ workers
+  processor:
+    build: .
+    depends_on:
+      - redis
+      - app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FIREBASE_CREDENTIALS_PATH=/app/bern-8dbc2-firebase-adminsdk-fbsvc-f2d05b268c.json
+    volumes:
+      - .:/app
+    command: python direct_processor.py
+    restart: unless-stopped
+
+volumes:
+  redis-data:

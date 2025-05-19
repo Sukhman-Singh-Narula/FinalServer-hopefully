@@ -1,20 +1,22 @@
-# Modifications needed for app/redis/audio_processor.py
+# app/redis/audio_processor.py
+import logging
+import json
+import time
+from io import BytesIO
+import wave
+from redis import Redis
+from rq import Queue
 
-"""
-This file provides the changes needed to update the existing audio_processor.py file
-to integrate with the agent_worker.py functionality.
+from app.config import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
+from app.agent_worker import process_audio, initialize_agent_session, end_agent_session
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
-Replace or merge these functions with your existing code.
-"""
+# Redis connection
+redis_conn = Redis(host='localhost', port=6379, db=0)
 
-# Add to imports:
-from app.agent_worker import (
-    initialize_agent_session, 
-    process_audio, 
-    end_agent_session
-)
-
-# Updated process_user_audio_chunk function with agent integration
 def process_user_audio_chunk(session_id, audio_key, timestamp):
     """
     Process a single audio chunk for a user
@@ -29,7 +31,7 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
         logger.warning(f"Audio data not found for key: {audio_key}")
         return {"status": "error", "message": "Audio data not found"}
     
-    # Get user ID from session info
+    # Get session info
     session_info_key = f"session:info:{session_id}"
     session_info = redis_conn.get(session_info_key)
     
@@ -69,32 +71,40 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
     buffer_size = redis_conn.strlen(buffer_key)
     logger.info(f"Buffer size for session {session_id}: {buffer_size} bytes")
     
-    # If buffer reaches threshold, process it
+    # If buffer reaches threshold, process it directly with agent
     # Threshold: 2 seconds of audio at 8kHz, 16-bit mono = 32000 bytes
     if buffer_size >= 32000:
-        # Process the audio buffer
-        buffer_result = process_audio_buffer(session_id, device_id)
-        
-        # Get the buffer data before clearing it
+        # Get the buffer data (we don't need to get it again but keeping for clarity)
         buffer_data = redis_conn.get(buffer_key)
         
-        # Create a key for the agent to process
-        agent_audio_key = f"agent:audio:{session_id}:{time.time()}"
-        redis_conn.set(agent_audio_key, buffer_data, ex=300)  # 5 min expiration
+        # Log audio stats
+        duration = buffer_size / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH)
+        logger.info(f"Audio buffer stats for {session_id}:")
+        logger.info(f"  Buffer size: {buffer_size} bytes")
+        logger.info(f"  Duration: {duration:.2f} seconds")
+        logger.info(f"  Sample rate: {SAMPLE_RATE} Hz, Channels: {CHANNELS}, Sample width: {SAMPLE_WIDTH} bytes")
         
         # Queue the buffer for processing by the agent worker
         agent_queue = Queue('agent_processing', connection=redis_conn)
         agent_job = agent_queue.enqueue(
-            'app.agent_worker.process_audio',
+            process_audio,
             session_id=session_id,
-            audio_key=agent_audio_key,
+            audio_key=buffer_key,  # Use the buffer key directly
             job_id=f"agent_job_{session_id}_{time.time()}"
         )
         
         logger.info(f"Queued agent processing job {agent_job.id} for session {session_id}")
         
+        # Update session stats
+        pipe = redis_conn.pipeline()
+        pipe.hincrby(stats_key, "buffers_processed", 1)
+        pipe.hset(stats_key, "last_buffer_size", buffer_size)
+        pipe.hset(stats_key, "last_buffer_duration", round(duration, 2))
+        pipe.hset(stats_key, "last_buffer_process_time", time.time())
+        pipe.execute()
+        
         # Clear the buffer for the next chunk
-        redis_conn.set(buffer_key, b"")
+        redis_conn.set(buffer_key, b"", ex=3600)
         
         return {
             "status": "processed_with_agent",
@@ -102,6 +112,7 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
             "device_id": device_id,
             "buffer_size": buffer_size,
             "agent_job_id": agent_job.id,
+            "duration": round(duration, 2),
             "timestamp": timestamp
         }
     
@@ -114,65 +125,18 @@ def process_user_audio_chunk(session_id, audio_key, timestamp):
         "timestamp": timestamp
     }
 
-# Updated process_audio_buffer function
+# Keep a deprecated version for backwards compatibility
 def process_audio_buffer(session_id, device_id):
-    """Process the accumulated audio buffer when it reaches sufficient size"""
-    logger.info(f"Processing complete audio buffer for session {session_id}")
-    
-    # Get the buffer data
-    buffer_key = f"buffer:{session_id}"
-    buffer_data = redis_conn.get(buffer_key)
-    
-    if not buffer_data or len(buffer_data) == 0:
-        logger.warning(f"Empty buffer for session {session_id}")
-        return {"status": "empty_buffer"}
-    
-    # Convert PCM data to WAV for analysis
-    wav_buffer = BytesIO()
-    with wave.open(wav_buffer, 'wb') as wav_file:
-        wav_file.setnchannels(CHANNELS)
-        wav_file.setsampwidth(SAMPLE_WIDTH)
-        wav_file.setframerate(SAMPLE_RATE)
-        wav_file.writeframes(buffer_data)
-    
-    # Calculate audio duration in seconds
-    duration = len(buffer_data) / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH)
-    
-    # Log the information
-    logger.info(f"Audio buffer stats for {session_id}:")
-    logger.info(f"  Buffer size: {len(buffer_data)} bytes")
-    logger.info(f"  Duration: {duration:.2f} seconds")
-    logger.info(f"  Sample rate: {SAMPLE_RATE} Hz, Channels: {CHANNELS}, Sample width: {SAMPLE_WIDTH} bytes")
-    
-    # Store processing result
-    result_key = f"result:{session_id}:{time.time()}"
-    result = {
-        "status": "buffer_processed",
+    """This function is now deprecated and only kept for metrics/logging compatibility"""
+    logger.info(f"process_audio_buffer is deprecated, using direct agent processing for {session_id}")
+    # Return a compatible result structure for any code that might still call this
+    return {
+        "status": "redirected_to_agent",
         "session_id": session_id,
         "device_id": device_id,
-        "buffer_size": len(buffer_data),
-        "duration": round(duration, 2),
-        "timestamp": time.time(),
-        "process_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+        "timestamp": time.time()
     }
-    
-    redis_conn.set(result_key, json.dumps(result), ex=3600)
-    
-    # Update session stats
-    stats_key = f"stats:{session_id}"
-    pipe = redis_conn.pipeline()
-    pipe.hincrby(stats_key, "buffers_processed", 1)
-    pipe.hset(stats_key, "last_buffer_size", len(buffer_data))
-    pipe.hset(stats_key, "last_buffer_duration", round(duration, 2))
-    pipe.hset(stats_key, "last_buffer_process_time", time.time())
-    pipe.execute()
-    
-    # Don't clear the buffer here - it will be processed by the agent worker
-    # and cleared after that
-    
-    return result
 
-# Updated start_user_session_processor function
 def start_user_session_processor(device_id, session_id, queue_name):
     """Initialize session processing for a user"""
     logger.info(f"Starting session processor for device {device_id}, session {session_id}")
@@ -199,7 +163,7 @@ def start_user_session_processor(device_id, session_id, queue_name):
     # Initialize agent session
     agent_queue = Queue('agent_processing', connection=redis_conn)
     agent_job = agent_queue.enqueue(
-        'app.agent_worker.initialize_agent_session',
+        initialize_agent_session,
         session_id=session_id,
         device_id=device_id,
         job_id=f"init_agent_{session_id}"
@@ -215,7 +179,6 @@ def start_user_session_processor(device_id, session_id, queue_name):
         "agent_job_id": agent_job.id
     }
 
-# Updated end_stream_processing function
 def end_stream_processing(session_id, device_id, reason="client_signal"):
     """End the audio stream processing and process any remaining buffer"""
     logger.info(f"Ending stream processing for session {session_id}, device {device_id}. Reason: {reason}")
@@ -223,28 +186,28 @@ def end_stream_processing(session_id, device_id, reason="client_signal"):
     # Process any remaining audio in the buffer
     buffer_key = f"buffer:{session_id}"
     if redis_conn.exists(buffer_key) and redis_conn.strlen(buffer_key) > 0:
-        result = process_audio_buffer(session_id, device_id)
+        buffer_size = redis_conn.strlen(buffer_key)
         
-        # Get the buffer data
-        buffer_data = redis_conn.get(buffer_key)
-        
-        # Create a key for the agent to process
-        agent_audio_key = f"agent:audio:{session_id}:{time.time()}"
-        redis_conn.set(agent_audio_key, buffer_data, ex=300)
-        
-        # Queue final buffer for processing
-        agent_queue = Queue('agent_processing', connection=redis_conn)
-        agent_job = agent_queue.enqueue(
-            'app.agent_worker.process_audio',
-            session_id=session_id,
-            audio_key=agent_audio_key,
-            job_id=f"final_agent_{session_id}_{time.time()}"
-        )
-        
-        logger.info(f"Queued final agent processing job {agent_job.id}")
+        # Only process if buffer has meaningful content
+        if buffer_size >= 8000:  # At least 0.5 seconds of audio
+            # Queue final buffer for processing directly by agent
+            agent_queue = Queue('agent_processing', connection=redis_conn)
+            agent_job = agent_queue.enqueue(
+                process_audio,
+                session_id=session_id,
+                audio_key=buffer_key,  # Use buffer key directly
+                job_id=f"final_agent_{session_id}_{time.time()}"
+            )
+            
+            logger.info(f"Queued final agent processing job {agent_job.id}")
         
         # Clear the buffer
         redis_conn.set(buffer_key, b"")
+        
+        result = {
+            "status": "final_buffer_processed",
+            "buffer_size": buffer_size
+        }
     else:
         result = {"status": "no_remaining_buffer"}
     
@@ -261,7 +224,7 @@ def end_stream_processing(session_id, device_id, reason="client_signal"):
     # End agent session
     agent_queue = Queue('agent_processing', connection=redis_conn)
     agent_job = agent_queue.enqueue(
-        'app.agent_worker.end_agent_session',
+        end_agent_session,
         session_id=session_id,
         reason=reason,
         job_id=f"end_agent_{session_id}"

@@ -1,0 +1,64 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+venv/
+.wsl-venv/
+ENV/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Redis dump
+dump.rdb
+
+# Logs
+*.log
+worker_errors.log
+
+# Docker specific files (not needed inside the container)
+.dockerignore
+docker-compose.yml
+
+# Git-related
+.git/
+.gitignore
+
+# Test files
+tests/
+test_*.py
+direct_processor.py  # We'll mount this file, no need to copy it
+
+# Documentation
+README.md
+DOCKER_GUIDE.md
+*.md
+docs/
+
+# Other unnecessary files
+.DS_Store
+Thumbs.db

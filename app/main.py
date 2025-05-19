@@ -1,3 +1,4 @@
+# app/main.py
 import time
 import wave
 from io import BytesIO
@@ -7,21 +8,21 @@ import logging
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException
+from redis import Redis
+from rq import Queue
+
 from app.redis.redis_client import get_redis_client, get_redis_pubsub
 from app.redis.worker import start_audio_worker
 from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
-from redis import Redis
-from rq import Queue
 from app.firebase_service import initialize_firebase, get_user_from_firestore
 from app.syllabus_manager import SyllabusManager
-from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException
+from app.redis.audio_processor import process_user_audio_chunk, start_user_session_processor, end_stream_processing
+from app.agent_worker import process_audio, initialize_agent_session, end_agent_session
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-SAMPLE_RATE = 8000
-CHANNELS = 1
-SAMPLE_WIDTH = 2
 
 redis_conn = Redis(host='localhost', port=6379, db=0)
 app = FastAPI(title="Language Tutor WebSocket Server")
@@ -106,7 +107,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     # Start a session processor for this user
     main_queue = Queue('session_management', connection=redis_conn)
     main_queue.enqueue(
-        'app.audio_processor.start_user_session_processor',
+        start_user_session_processor,
         device_id=device_id,
         session_id=session_id,
         queue_name=user_queue_name,
@@ -116,8 +117,13 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     # Track this connection
     active_connections[session_id] = websocket
     
-    # Track audio chunks received
-    audio_chunk_count = 0
+    # Create PubSub subscription for agent responses
+    pubsub = redis_conn.pubsub()
+    pubsub.subscribe(f"agent:updates:{session_id}")
+    
+    # Start background task to listen for agent responses
+    background_tasks = BackgroundTasks()
+    background_tasks.add_task(listen_for_agent_responses, pubsub, websocket, session_id)
     
     try:
         while True:
@@ -126,11 +132,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
             if "bytes" in data:
                 # Handle binary audio data
                 audio_bytes = data["bytes"]
-                audio_chunk_count += 1
-                
-                # Log every 10 chunks
-                if audio_chunk_count % 10 == 0:
-                    logger.info(f"Received {audio_chunk_count} audio chunks from device {device_id} (session {session_id})")
                 
                 # Store in Redis with a timestamp key
                 timestamp = time.time()
@@ -139,11 +140,12 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                 
                 # Add this chunk to the user's dedicated queue
                 job = user_queue.enqueue(
-                    'app.audio_processor.process_user_audio_chunk',
+                    process_user_audio_chunk,  # CORRECT PATH
                     session_id=session_id,
                     audio_key=audio_key,
                     timestamp=timestamp
                 )
+
                 
                 # Save the last job ID for dependencies if needed
                 redis_conn.set(f"last_job:{session_id}", job.id, ex=300)
@@ -165,7 +167,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                         # Signal end of audio stream
                         await asyncio.to_thread(
                             session_queue.enqueue,
-                            'app.audio_processor.end_stream_processing',
+                            end_stream_processing,
                             session_id=session_id,
                             device_id=device_id
                         )
@@ -174,6 +176,28 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
                             "type": "info",
                             "message": "Stream end acknowledged"
                         }))
+                        
+                    elif command_type == "text_input":
+                        # Handle direct text input (for testing/fallback)
+                        text_content = message.get("content", "")
+                        if text_content:
+                            # Create a key to store the text
+                            text_key = f"text:{session_id}:{time.time()}"
+                            redis_conn.set(text_key, text_content, ex=300)
+                            
+                            # Process directly with agent (skip audio processing)
+                            agent_queue = Queue('agent_processing', connection=redis_conn)
+                            agent_job = agent_queue.enqueue(
+                                'app.agent_worker.process_text_input',
+                                session_id=session_id,
+                                text_key=text_key,
+                                job_id=f"text_input_{session_id}_{time.time()}"
+                            )
+                            
+                            await websocket.send_text(json.dumps({
+                                "type": "info",
+                                "message": "Text input received and being processed"
+                            }))
                         
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON received")
@@ -184,7 +208,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     
     except WebSocketDisconnect:
         logger.info(f"ESP device disconnected: {device_id}, session: {session_id}")
-        logger.info(f"Total audio chunks received: {audio_chunk_count}")
         # Clean up
         if session_id in active_connections:
             del active_connections[session_id]
@@ -193,7 +216,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         try:
             await asyncio.to_thread(
                 session_queue.enqueue,
-                'app.audio_processor.end_stream_processing',
+                'app.redis.audio_processor.end_stream_processing',
                 session_id=session_id,
                 device_id=device_id,
                 reason="disconnect"
@@ -206,6 +229,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
         # Clean up
         if session_id in active_connections:
             del active_connections[session_id]
+
 # Add this function for agent response handling
 async def listen_for_agent_responses(pubsub, websocket, session_id):
     """Listen for agent responses from Redis PubSub"""
@@ -265,7 +289,6 @@ async def get_available_games():
     await syllabus.initialize()
     games = syllabus.get_all_games()
     return games
-
 
 @app.on_event("startup")
 async def startup_event():

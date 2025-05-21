@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly no
+    networks:
+      - app-network
+
+  app:
+    image: python:3.9-slim
+    volumes:
+      - ./:/code
+      - ./credentials:/code/credentials
+    working_dir: /code
+    ports:
+      - "8000:8000"
+    # Will be replaced with the actual IP in the startup script
+    environment:
+      - REDIS_HOST=IP_PLACEHOLDER
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FIREBASE_CREDENTIALS_PATH=/code/credentials/firebase-credentials.json
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    command: >
+      bash -c "
+      sleep 10 &&
+      pip install -r requirements.txt &&
+      python run.py
+      "
+
+  worker-manager:
+    image: python:3.9-slim
+    volumes:
+      - ./:/code
+      - ./credentials:/code/credentials
+    working_dir: /code
+    # Will be replaced with the actual IP in the startup script
+    environment:
+      - REDIS_HOST=IP_PLACEHOLDER
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FIREBASE_CREDENTIALS_PATH=/code/credentials/firebase-credentials.json
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AGENT_WORKERS=2
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    command: >
+      bash -c "
+      sleep 15 &&
+      pip install -r requirements.txt &&
+      python app/redis/worker_manager.py
+      "
+      
+  audio-worker:
+    image: python:3.9-slim
+    volumes:
+      - ./:/code
+      - ./credentials:/code/credentials
+    working_dir: /code
+    # Will be replaced with the actual IP in the startup script
+    environment:
+      - REDIS_HOST=IP_PLACEHOLDER
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FIREBASE_CREDENTIALS_PATH=/code/credentials/firebase-credentials.json
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - worker-manager
+    networks:
+      - app-network
+    command: >
+      bash -c "
+      sleep 20 &&
+      pip install -r requirements.txt &&
+      python start_workers.py
+      "
+
+networks:
+  app-network:
+    driver: bridge

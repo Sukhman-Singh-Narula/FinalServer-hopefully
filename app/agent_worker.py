@@ -17,7 +17,7 @@ from app.openai_service import (
     generate_streaming_response,
     generate_speech
 )
-from app.config import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
+from app.config import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH, REDIS_HOST, REDIS_PORT, REDIS_DB
 from app.spanish_workflow import SpanishWorkflow
 
 # Configure logging
@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # Redis connection
-redis_conn = redis.Redis(host='localhost', port=6379, db=0)
+redis_conn = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 def pcm_to_wav(pcm_bytes: bytes) -> bytes:
     """Convert PCM data to WAV format."""

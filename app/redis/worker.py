@@ -8,6 +8,7 @@ from rq import Queue, SimpleWorker
 from rq.job import Job
 from io import BytesIO
 import wave
+from app.config import REDIS_HOST, REDIS_PORT, REDIS_DB
 
 from app.config import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
 
@@ -17,7 +18,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # Redis connection
-redis_conn = Redis(host='localhost', port=6379, db=0)
+redis_conn = Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 # Function to start a worker for a specific queue
 def start_worker(queue_names):

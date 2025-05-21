@@ -9,6 +9,7 @@ import sys
 import traceback
 from rq import Worker, Queue
 from multiprocessing import Process
+from app.config import REDIS_HOST, REDIS_PORT, REDIS_DB
 
 # Configure logging with more detail
 logging.basicConfig(
@@ -19,7 +20,8 @@ logger = logging.getLogger("worker_manager")
 
 # Redis connection with error handling
 try:
-    redis_conn = redis.Redis(host='localhost', port=6379, db=0)
+# Replace the existing Redis connection with:
+    redis_conn = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
     # Verify Redis connection
     ping_result = redis_conn.ping()
     logger.info(f"Redis connection test: {ping_result}")

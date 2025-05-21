@@ -14,8 +14,10 @@ parser.add_argument('--refresh', type=int, default=5, help='Refresh interval in 
 parser.add_argument('--device', type=str, help='Filter by specific device ID')
 args = parser.parse_args()
 
+from app.config import REDIS_HOST, REDIS_PORT, REDIS_DB
+
 # Redis connection
-redis_conn = redis.Redis(host='localhost', port=6379, db=0)
+redis_conn = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 def clear_screen():
     """Clear the terminal screen"""

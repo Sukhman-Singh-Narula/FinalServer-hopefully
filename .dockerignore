@@ -1,0 +1,12 @@
+.git
+.git*
+.env
+__pycache__/
+.venv/
+.gitignore
+SystemDesign.svg
+*.pyc
+**/node_modules
+**/.DS_Store
+**/.idea
+**/.vscode

@@ -11,20 +11,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import WebSocket, WebSocketDisconnect, Depends, HTTPException
 from redis import Redis
 from rq import Queue
-
 from app.redis.redis_client import get_redis_client, get_redis_pubsub
 from app.redis.worker import start_audio_worker
-from app.config import FIREBASE_CREDENTIALS_PATH, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
+from app.config import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH, REDIS_HOST, REDIS_PORT, REDIS_DB
 from app.firebase_service import initialize_firebase, get_user_from_firestore
 from app.syllabus_manager import SyllabusManager
 from app.redis.audio_processor import process_user_audio_chunk, start_user_session_processor, end_stream_processing
-from app.agent_worker import process_audio, initialize_agent_session, end_agent_session
+# from app.agent_worker import process_audio, initialize_agent_session, end_agent_session
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+from app.redis.redis_client import get_sync_redis_client
 
-redis_conn = Redis(host='localhost', port=6379, db=0)
+# Replace the line around line 29
+redis_conn = get_sync_redis_client()
 app = FastAPI(title="Language Tutor WebSocket Server")
 audio_queue = Queue('audio', connection=redis_conn)
 stream_queues = {}
@@ -92,7 +93,8 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     
     # Create a dedicated queue for this user's audio
     user_queue_name = f"user_{device_id}"
-    redis_conn = Redis(host='localhost', port=6379, db=0)
+    
+    redis_conn = get_sync_redis_client()
     user_queue = Queue(user_queue_name, connection=redis_conn)
     
     # Store session info in Redis

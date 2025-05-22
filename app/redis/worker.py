@@ -16,9 +16,9 @@ from app.config import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
+from app.redis.redis_client import get_sync_redis_client
 
-# Redis connection
-redis_conn = Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+redis_conn = get_sync_redis_client()
 
 # Function to start a worker for a specific queue
 def start_worker(queue_names):
@@ -26,9 +26,10 @@ def start_worker(queue_names):
     logger.info(f"Starting worker for queues: {', '.join(queue_names)}")
     
     # Create worker with explicit connection
+    redis_client = get_sync_redis_client()
     worker = SimpleWorker(
-        [Queue(name, connection=redis_conn) for name in queue_names],
-        connection=redis_conn
+    [Queue(name, connection=redis_client) for name in queue_names],
+    connection=redis_client
     )
     
     # Start processing jobs

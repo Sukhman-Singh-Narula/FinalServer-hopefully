@@ -7,7 +7,9 @@ services:
       - "6379:6379"
     command: redis-server --appendonly no
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - redis
 
   app:
     image: python:3.9-slim
@@ -17,9 +19,8 @@ services:
     working_dir: /code
     ports:
       - "8000:8000"
-    # Will be replaced with the actual IP in the startup script
     environment:
-      - REDIS_HOST=IP_PLACEHOLDER
+      - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
       - FIREBASE_CREDENTIALS_PATH=/code/credentials/firebase-credentials.json
@@ -30,7 +31,7 @@ services:
       - app-network
     command: >
       bash -c "
-      sleep 10 &&
+      echo '172.19.0.2 redis' >> /etc/hosts &&
       pip install -r requirements.txt &&
       python run.py
       "
@@ -41,21 +42,21 @@ services:
       - ./:/code
       - ./credentials:/code/credentials
     working_dir: /code
-    # Will be replaced with the actual IP in the startup script
     environment:
-      - REDIS_HOST=IP_PLACEHOLDER
+      - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
       - FIREBASE_CREDENTIALS_PATH=/code/credentials/firebase-credentials.json
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - AGENT_WORKERS=2
+      - PYTHONPATH=/code
     depends_on:
       - redis
     networks:
       - app-network
     command: >
       bash -c "
-      sleep 15 &&
+      echo '172.19.0.2 redis' >> /etc/hosts &&
       pip install -r requirements.txt &&
       python app/redis/worker_manager.py
       "
@@ -66,9 +67,8 @@ services:
       - ./:/code
       - ./credentials:/code/credentials
     working_dir: /code
-    # Will be replaced with the actual IP in the startup script
     environment:
-      - REDIS_HOST=IP_PLACEHOLDER
+      - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
       - FIREBASE_CREDENTIALS_PATH=/code/credentials/firebase-credentials.json
@@ -80,7 +80,7 @@ services:
       - app-network
     command: >
       bash -c "
-      sleep 20 &&
+      echo '172.19.0.2 redis' >> /etc/hosts &&
       pip install -r requirements.txt &&
       python start_workers.py
       "

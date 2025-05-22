@@ -10,6 +10,8 @@ import traceback
 from rq import Worker, Queue
 from multiprocessing import Process
 from app.config import REDIS_HOST, REDIS_PORT, REDIS_DB
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 
 # Configure logging with more detail
 logging.basicConfig(
@@ -83,8 +85,18 @@ def start_worker_for_queue(queue_name):
         logger.info(f"Python executable: {sys.executable}")
         logger.info(f"Current working directory: {os.getcwd()}")
         
-        # Create a new Redis connection for this worker
-        worker_redis = redis.Redis(host='localhost', port=6379, db=0)
+        redis_host = os.getenv("REDIS_HOST", "redis")
+        redis_port = int(os.getenv("REDIS_PORT", 6379))
+        redis_db = int(os.getenv("REDIS_DB", 0))
+        
+        logger.info(f"Connecting to Redis at {redis_host}:{redis_port}")
+        
+        # Create a new Redis connection
+        worker_redis = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            db=redis_db
+        )
         
         # Test Redis connection
         ping_result = worker_redis.ping()
